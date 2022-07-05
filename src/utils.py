@@ -3,7 +3,7 @@ import glob
 import os
 
 import joblib
-# EEG preprocessing and filtering
+
 import mne
 import numpy as np
 import pandas as pd
@@ -87,5 +87,115 @@ def filter_normalize_crop(ft: np.array) -> np.array:
     max_ft = 225
 
     ft[:, 1] = (ft[:, 1] - min_ft) / (max_ft - min_ft)
+    ft[:,0] /= 1000.0 # convert time to seconds
 
     return ft
+
+
+#### TODO: comment the functions below
+
+def load_dataset(dir = 'feeltrace', subject_num = 5, interpolate=False, resample_period='33ms'):
+    # choose the subject
+    subject_data_files = glob.glob(os.path.join(dir, '*.csv'))
+    # sort the files by the index given to them
+    file_name_2_index = lambda file : int(file.split('.csv')[0].split('_')[-1])
+    subject_data_files.sort() # sort alphabetically
+    subject_data_files.sort(key=file_name_2_index) # sort by index
+    eeg_ft = subject_data_files[subject_num-1]
+
+    print(f"Chosen subject: {eeg_ft}")
+    
+    data_signal = pd.read_csv(eeg_ft) # read the Nx2 data for a single subject
+
+    if interpolate:
+        data_signal = interpolate_df(data_signal, resample_period=resample_period)
+
+    # return signal
+    return data_signal
+
+def interpolate_df(df, timestamps='t', resample_period='33ms'):
+    '''
+    resample and fill in nan values using zero hold
+    '''
+    df[timestamps] = pd.to_datetime(df[timestamps], unit='s')
+    df_time_indexed = df.set_index(timestamps)
+    df_padded = df_time_indexed.resample(resample_period, origin='start') # resample
+    df_padded = df_padded.ffill() # fill nan values with the previous valid value
+    df_padded.reset_index(inplace=True)
+    df_padded[timestamps] = df_padded[timestamps].astype('int64') / 1e9 # nano second to seconds
+    return df_padded
+
+def generate_label(feeltrace, split_size=100, k=5, label_type='angle', num_classes=3):
+    
+    # split into windows (non-overlapping)
+    dataset = [feeltrace[x : x + split_size] for x in range(0, len(feeltrace), split_size)]
+    if len(dataset[-1]) < split_size:
+        dataset.pop() # remove last window if it is smaller than the rest
+
+    if label_type != 'both':
+        labels = get_label(dataset, n_labels=num_classes, label_type=label_type).squeeze() # (N, 1)
+    else:
+        labels = get_combined_label(dataset, n_labels=int(np.sqrt(num_classes))).squeeze() # (N, 1)
+
+    print(f"label set shape (N,):  {labels.shape}")
+
+    indices = split_dataset(labels, k=k) # split data into train/test indices using kFold validation
+    return labels, indices
+
+
+def get_label(data, n_labels=3, label_type='angle'):
+    if label_type == 'angle':
+        labels = stress_2_angle(np.vstack([x[:,1].T for x in data])) # angle/slope mapped to [0,1] in a time window
+    elif label_type == 'pos':
+        labels = np.vstack([x[:,1].mean() for x in data]) # mean value within the time window
+    else:
+        labels = stress_2_accumulator(np.vstack([x[:,1].T for x in data])) # accumulator mapped to [0,1] in a time window
+        
+    label_dist = stress_2_label(labels, n_labels=n_labels)
+    return label_dist
+
+def get_combined_label(data, n_labels=3):
+    angle_labels = get_label(data, n_labels=n_labels, label_type='angle').squeeze() # (N, 1)
+    pos_labels = get_label(data, n_labels=n_labels, label_type='pos').squeeze() # (N, 1)
+
+    labels = [x for x in range(n_labels)]
+    labels_dict =  {(a, b) : n_labels*a+b for a in labels for b in labels} # cartesian product
+    combined_labels = [labels_dict[(pos, angle)] for (pos, angle) in zip(pos_labels, angle_labels)]
+    return np.array(combined_labels)
+
+
+def stress_2_label(mean_stress, n_labels=5):
+    # value is in [0,1] so map to [0,labels-1] and discretize
+    return np.digitize(mean_stress * n_labels, np.arange(n_labels)) - 1
+
+def stress_2_angle(stress_windows):
+    '''
+    do a linear least squares fit in the time window
+    stress_window: (N_samples, time_window)
+    '''
+    xvals = np.arange(stress_windows.shape[-1])/1e3/60 # time in (minutes)
+    slope = np.polyfit(xvals, stress_windows.T, 1)[0] # take slope linear term # 1/s
+    angle = np.arctan(slope)/ (np.pi/2) * 0.5 + 0.5 # map to [0,1]
+    return angle
+
+def stress_2_accumulator(stress_windows):
+    '''
+    apply an integral to the time window
+    stress_window: (N_samples, time_window)
+    '''
+    max_area = stress_windows.shape[-1]
+    xvals = np.arange(stress_windows.shape[-1]) # time in (ms)
+    integral = np.trapz(stress_windows, x=xvals)
+    return integral/max_area # map to [0,1]
+
+def split_dataset(labels, k=5):
+    '''
+    split the features and labels into k groups for k fold validation
+    we use StratifiedKFold to ensure that the class distributions within each sample is the same as the global distribution
+    '''
+    kf = StratifiedKFold(n_splits=k, shuffle=True)
+
+    # only labels are required for generating the split indices so we ignore it
+    temp_features = np.zeros_like(labels)
+    indices = [(train_index, test_index) for train_index, test_index in kf.split(temp_features, labels)]
+    return indices
