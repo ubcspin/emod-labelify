@@ -45,6 +45,7 @@ def create_dataset(src_dir: str, out_dir = 'feeltrace', num_workers=2) -> None:
     """
     subject_data_dir = glob.glob(os.path.join(src_dir, 'p*'))
     subject_data_dir.sort(key=lambda x:int(x.split("p")[-1])) # sort in non decreasing order
+    print(subject_data_dir)
 
     subject_data = [glob.glob(os.path.join(x, '*')) for x in subject_data_dir]
 
