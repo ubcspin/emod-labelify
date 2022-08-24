@@ -131,4 +131,7 @@ dmypy.json
 # any mat files
 *.mat
 *.csv
-participant/p*
+participant/p*.DS_Store
+._.DS_Store
+**/.DS_Store
+**/._.DS_Store
